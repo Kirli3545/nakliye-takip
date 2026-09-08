@@ -74,13 +74,31 @@ function fileToDataUrl(file) {
   });
 }
 
+function dataUrlToBlob(dataUrl) {
+  const [header, base64] = dataUrl.split(",");
+  const mimeMatch = header.match(/data:(.*?);base64/);
+  const mime = mimeMatch ? mimeMatch[1] : "application/octet-stream";
+  const binary = atob(base64);
+  const array = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) array[i] = binary.charCodeAt(i);
+  return new Blob([array], { type: mime });
+}
+
 function downloadDataUrl(dataUrl, fileName) {
-  const a = document.createElement("a");
-  a.href = dataUrl;
-  a.download = fileName || "belge";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  try {
+    const blob = dataUrlToBlob(dataUrl);
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = fileName || "belge";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
+  } catch (e) {
+    // Blob dönüşümü başarısız olursa, en azından yeni sekmede açmayı dene
+    window.open(dataUrl, "_blank");
+  }
 }
 
 function safeKeyPart(str) {
