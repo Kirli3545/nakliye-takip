@@ -48,6 +48,19 @@ const EMPLOYEE_DOC_TYPES = [
 
 const SHIPMENT_TYPES = ["Nakliye", "Yükleme/İndirme"];
 
+// Her veri türü kendi kaydında saklanır — böylece biri belge yüklerken
+// biri nakliye bildirirse, birbirlerinin verisini ezmezler.
+const STORAGE_KEYS = [
+  "employees",
+  "shipments",
+  "leaveRequests",
+  "overtimeReports",
+  "machines",
+  "workReports",
+  "vehicles",
+  "employeeDocs",
+];
+
 function daysUntil(dateStr) {
   if (!dateStr) return null;
   const today = new Date();
@@ -256,16 +269,40 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
+      const base = { employees: [], shipments: [], leaveRequests: [], overtimeReports: [], machines: [], workReports: [], vehicles: [], employeeDocs: {} };
       try {
-        const res = await window.storage.get("workspace-data", true);
-        const base = { employees: [], shipments: [], leaveRequests: [], overtimeReports: [], machines: [], workReports: [], vehicles: [], employeeDocs: {} };
-        if (res && res.value) {
-          setData({ ...base, ...JSON.parse(res.value) });
-        } else {
-          setData(base);
+        const results = await Promise.all(
+          STORAGE_KEYS.map((k) => window.storage.get(`data:${k}`, true).catch(() => null))
+        );
+        let assembled = {};
+        let anyFound = false;
+        STORAGE_KEYS.forEach((k, i) => {
+          if (results[i] && results[i].value !== undefined && results[i].value !== null) {
+            try {
+              assembled[k] = JSON.parse(results[i].value);
+              anyFound = true;
+            } catch (e) {}
+          }
+        });
+
+        if (!anyFound) {
+          // Yeni ayrı-anahtar sistemine geçmeden önce eski tekli kayıt var mıydı, ona bak
+          // (varsa göç ettir, yoksa boştan başla).
+          const legacy = await window.storage.get("workspace-data", true).catch(() => null);
+          if (legacy && legacy.value) {
+            const legacyData = JSON.parse(legacy.value);
+            assembled = { ...base, ...legacyData };
+            await Promise.all(
+              STORAGE_KEYS.map((k) =>
+                window.storage.set(`data:${k}`, JSON.stringify(assembled[k] ?? base[k]), true)
+              )
+            );
+          }
         }
+
+        setData({ ...base, ...assembled });
       } catch (e) {
-        setData({ employees: [], shipments: [], leaveRequests: [], overtimeReports: [], machines: [], workReports: [], vehicles: [], employeeDocs: {} });
+        setData(base);
       }
       setLoaded(true);
     })();
@@ -281,8 +318,10 @@ export default function App() {
   async function persist(next) {
     setData(next);
     try {
-      const res = await window.storage.set("workspace-data", JSON.stringify(next), true);
-      if (!res) setSaveError("Kaydedilemedi, tekrar deneyin.");
+      const results = await Promise.all(
+        STORAGE_KEYS.map((k) => window.storage.set(`data:${k}`, JSON.stringify(next[k]), true))
+      );
+      if (results.some((r) => !r)) setSaveError("Kaydedilemedi, tekrar deneyin.");
       else setSaveError("");
     } catch (e) {
       setSaveError("Kaydedilemedi, tekrar deneyin.");
