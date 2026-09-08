@@ -251,6 +251,7 @@ export default function App() {
   const [data, setData] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [session, setSession] = useState(undefined);
+  const [authReady, setAuthReady] = useState(false);
   const [tab, setTab] = useState("nakliyeler");
   const [saveError, setSaveError] = useState("");
   const fileInputRef = useRef(null);
@@ -260,7 +261,10 @@ export default function App() {
   const currentName = session?.user?.user_metadata?.name || "";
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setAuthReady(true);
+    });
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
     });
@@ -268,6 +272,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Oturum durumu netlesmeden ya da giris yapilmadan veri cekmeye CALISMIYORUZ
+    if (!session) {
+      return;
+    }
+    setLoaded(false);
     (async () => {
       const base = { employees: [], shipments: [], leaveRequests: [], overtimeReports: [], machines: [], workReports: [], vehicles: [], employeeDocs: {} };
       try {
@@ -306,7 +315,7 @@ export default function App() {
       }
       setLoaded(true);
     })();
-  }, []);
+  }, [session]);
 
   useEffect(() => {
     if (role === "calisan" && currentName && data && !data.employees.includes(currentName)) {
@@ -328,12 +337,16 @@ export default function App() {
     }
   }
 
-  if (!loaded || session === undefined) {
+  if (!authReady) {
     return <div style={{ padding: 24, color: MUTED, fontFamily: "sans-serif" }}>Yükleniyor...</div>;
   }
 
   if (!session) {
     return <AuthLogin />;
+  }
+
+  if (!loaded) {
+    return <div style={{ padding: 24, color: MUTED, fontFamily: "sans-serif" }}>Yükleniyor...</div>;
   }
 
   if (!role || !currentName) {
