@@ -321,7 +321,7 @@ export default function App() {
   return (
     <>
     <div className="no-print" style={{ fontFamily: "'Inter', 'Segoe UI', sans-serif", background: BG, minHeight: "100%", color: INK }}>
-      <input type="file" accept="image/*" capture="environment" ref={fileInputRef} onChange={onFileChosen} style={{ display: "none" }} />
+      <input type="file" accept="image/*" ref={fileInputRef} onChange={onFileChosen} style={{ display: "none" }} />
       <TopBar
         role={role}
         currentName={currentName}
