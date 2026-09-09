@@ -59,6 +59,7 @@ const STORAGE_KEYS = [
   "workReports",
   "vehicles",
   "employeeDocs",
+  "employeeLocations",
 ];
 
 function daysUntil(dateStr) {
@@ -278,7 +279,7 @@ export default function App() {
     }
     setLoaded(false);
     (async () => {
-      const base = { employees: [], shipments: [], leaveRequests: [], overtimeReports: [], machines: [], workReports: [], vehicles: [], employeeDocs: {} };
+      const base = { employees: [], shipments: [], leaveRequests: [], overtimeReports: [], machines: [], workReports: [], vehicles: [], employeeDocs: {}, employeeLocations: {} };
       try {
         const results = await Promise.all(
           STORAGE_KEYS.map((k) => window.storage.get(`data:${k}`, true).catch(() => null))
@@ -325,10 +326,14 @@ export default function App() {
   }, [role, currentName, data]);
 
   async function persist(next) {
+    const prev = data;
     setData(next);
     try {
+      const changedKeys = STORAGE_KEYS.filter(
+        (k) => JSON.stringify(next[k]) !== JSON.stringify(prev ? prev[k] : undefined)
+      );
       const results = await Promise.all(
-        STORAGE_KEYS.map((k) => window.storage.set(`data:${k}`, JSON.stringify(next[k]), true))
+        changedKeys.map((k) => window.storage.set(`data:${k}`, JSON.stringify(next[k]), true))
       );
       if (results.some((r) => !r)) setSaveError("Kaydedilemedi, tekrar deneyin.");
       else setSaveError("");
@@ -365,12 +370,37 @@ export default function App() {
   const myShipments = data.shipments.filter((s) => s.assignedTo === currentName);
   const myLeaves = data.leaveRequests.filter((l) => l.employeeName === currentName);
 
+  function captureLocationSilently() {
+    if (role !== "calisan" || !currentName || !navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const loc = {
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          timestamp: new Date().toISOString(),
+        };
+        setData((prev) => {
+          if (!prev) return prev;
+          const nextLocations = { ...(prev.employeeLocations || {}), [currentName]: loc };
+          window.storage.set("data:employeeLocations", JSON.stringify(nextLocations), true);
+          return { ...prev, employeeLocations: nextLocations };
+        });
+      },
+      () => {
+        // Konum izni verilmediyse veya alınamadıysa sessizce geç —
+        // nakliye/durum bildirimini bu yüzden engellemiyoruz.
+      },
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  }
+
   function updateShipment(id, patch) {
     const next = {
       ...data,
       shipments: data.shipments.map((s) => (s.id === id ? { ...s, ...patch } : s)),
     };
     persist(next);
+    if (patch.status) captureLocationSilently();
   }
 
   function handlePhotoPick(shipmentId) {
@@ -407,7 +437,7 @@ export default function App() {
           ["izinler", "İzin / Rapor"],
           ["mesai", "Fazla Mesai"],
           ["calismaformu", "Çalışma Formu"],
-          ...(role === "yonetici" ? [["calisanlar", "Çalışanlar"], ["araclar", "Araçlar"], ["personelbelgeleri", "Personel Belgeleri"]] : [["belgelerim", "Belgelerim"]]),
+          ...(role === "yonetici" ? [["calisanlar", "Çalışanlar"], ["araclar", "Araçlar"], ["personelbelgeleri", "Personel Belgeleri"], ["konumlar", "Şoför Konumları"]] : [["belgelerim", "Belgelerim"]]),
         ].map(([key, label]) => (
           <button
             key={key}
@@ -437,15 +467,16 @@ export default function App() {
             shipments={myShipments}
             updateShipment={updateShipment}
             onPhotoPick={handlePhotoPick}
-            onCreate={(s) =>
+            onCreate={(s) => {
               persist({
                 ...data,
                 shipments: [
                   { ...s, id: uid(), assignedTo: currentName, source: "surucu", photos: [], createdAt: new Date().toISOString() },
                   ...data.shipments,
                 ],
-              })
-            }
+              });
+              captureLocationSilently();
+            }}
           />
         )}
         {tab === "izinler" && role === "yonetici" && (
@@ -471,6 +502,9 @@ export default function App() {
         )}
         {tab === "personelbelgeleri" && role === "yonetici" && (
           <EmployeeDocsSection data={data} persist={persist} />
+        )}
+        {tab === "konumlar" && role === "yonetici" && (
+          <DriverLocationsSection data={data} />
         )}
         {tab === "belgelerim" && role === "calisan" && (
           <MyDocuments employeeName={currentName} docs={(data.employeeDocs || {})[currentName] || {}} />
@@ -1973,6 +2007,125 @@ function MyDocuments({ employeeName, docs }) {
           />
         ))}
       </div>
+    </div>
+  );
+}
+
+function DriverLocationsMap({ locations }) {
+  const mapContainerRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+  const markersRef = useRef([]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    import("leaflet").then((L) => {
+      if (cancelled) return;
+      const leaflet = L.default || L;
+
+      const icon = new leaflet.Icon({
+        iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+        iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+        shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+        iconSize: [25, 41],
+        iconAnchor: [12, 41],
+      });
+
+      if (!mapInstanceRef.current) {
+        mapInstanceRef.current = leaflet.map(mapContainerRef.current).setView([38.42, 27.14], 8);
+        leaflet
+          .tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            attribution: "© OpenStreetMap contributors",
+            maxZoom: 19,
+          })
+          .addTo(mapInstanceRef.current);
+      }
+
+      markersRef.current.forEach((m) => m.remove());
+      markersRef.current = [];
+
+      const entries = Object.entries(locations || {}).filter(([, loc]) => loc && loc.lat && loc.lng);
+
+      entries.forEach(([name, loc]) => {
+        const minutesAgo = loc.timestamp
+          ? Math.max(0, Math.round((Date.now() - new Date(loc.timestamp).getTime()) / 60000))
+          : null;
+        const marker = leaflet.marker([loc.lat, loc.lng], { icon }).addTo(mapInstanceRef.current);
+        marker.bindPopup(
+          `<b>${name}</b><br/>${minutesAgo !== null ? minutesAgo + " dakika önce" : "Zaman bilinmiyor"}`
+        );
+        markersRef.current.push(marker);
+      });
+
+      if (entries.length > 0) {
+        const bounds = leaflet.latLngBounds(entries.map(([, loc]) => [loc.lat, loc.lng]));
+        if (bounds.isValid()) {
+          mapInstanceRef.current.fitBounds(bounds, { padding: [30, 30], maxZoom: 13 });
+        }
+      }
+
+      setTimeout(() => mapInstanceRef.current && mapInstanceRef.current.invalidateSize(), 100);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [locations]);
+
+  useEffect(() => {
+    return () => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+      }
+    };
+  }, []);
+
+  return (
+    <div
+      ref={mapContainerRef}
+      style={{ width: "100%", height: 420, borderRadius: 12, overflow: "hidden", border: `1px solid ${BORDER}` }}
+    />
+  );
+}
+
+function DriverLocationsSection({ data }) {
+  const locations = data.employeeLocations || {};
+  const entries = Object.entries(locations).sort((a, b) => {
+    const ta = a[1]?.timestamp ? new Date(a[1].timestamp).getTime() : 0;
+    const tb = b[1]?.timestamp ? new Date(b[1].timestamp).getTime() : 0;
+    return tb - ta;
+  });
+
+  return (
+    <div>
+      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Şoför Konumları</div>
+      <div style={{ fontSize: 13, color: MUTED, marginBottom: 14 }}>
+        Bir şoför nakliye bildirdiğinde veya durumunu güncellediğinde konumu otomatik olarak burada görünür.
+      </div>
+
+      {entries.length === 0 ? (
+        <EmptyState text="Henüz konum paylaşımı yok." />
+      ) : (
+        <>
+          <DriverLocationsMap locations={locations} />
+          <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+            {entries.map(([name, loc]) => {
+              const minutesAgo = loc.timestamp
+                ? Math.max(0, Math.round((Date.now() - new Date(loc.timestamp).getTime()) / 60000))
+                : null;
+              return (
+                <Card key={name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ fontWeight: 600 }}>{name}</div>
+                  <div style={{ fontSize: 13, color: MUTED }}>
+                    {minutesAgo !== null ? `${minutesAgo} dk önce` : "Zaman bilinmiyor"}
+                  </div>
+                </Card>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 }
