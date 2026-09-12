@@ -60,7 +60,22 @@ const STORAGE_KEYS = [
   "vehicles",
   "employeeDocs",
   "employeeLocations",
+  "employeeLeaveEntitlements",
 ];
+
+function daysBetweenInclusive(start, end) {
+  if (!start || !end) return 0;
+  const s = new Date(start);
+  const e = new Date(end);
+  const diff = Math.round((e - s) / 86400000) + 1;
+  return diff > 0 ? diff : 0;
+}
+
+function computeUsedLeaveDays(leaveRequests, employeeName) {
+  return leaveRequests
+    .filter((l) => l.employeeName === employeeName && l.type === "İzin" && l.status === "Onaylandı")
+    .reduce((sum, l) => sum + daysBetweenInclusive(l.startDate, l.endDate), 0);
+}
 
 function daysUntil(dateStr) {
   if (!dateStr) return null;
@@ -279,7 +294,7 @@ export default function App() {
     }
     setLoaded(false);
     (async () => {
-      const base = { employees: [], shipments: [], leaveRequests: [], overtimeReports: [], machines: [], workReports: [], vehicles: [], employeeDocs: {}, employeeLocations: {} };
+      const base = { employees: [], shipments: [], leaveRequests: [], overtimeReports: [], machines: [], workReports: [], vehicles: [], employeeDocs: {}, employeeLocations: {}, employeeLeaveEntitlements: {} };
       try {
         const results = await Promise.all(
           STORAGE_KEYS.map((k) => window.storage.get(`data:${k}`, true).catch(() => null))
@@ -499,7 +514,12 @@ export default function App() {
           <ManagerLeaves data={data} persist={persist} />
         )}
         {tab === "izinler" && role === "calisan" && (
-          <DriverLeaves leaves={myLeaves} onSubmit={(req) => persist({ ...data, leaveRequests: [{ ...req, id: uid(), employeeName: currentName, status: "Beklemede" }, ...data.leaveRequests] })} />
+          <DriverLeaves
+            leaves={myLeaves}
+            entitlement={(data.employeeLeaveEntitlements || {})[currentName]}
+            usedDays={computeUsedLeaveDays(data.leaveRequests, currentName)}
+            onSubmit={(req) => persist({ ...data, leaveRequests: [{ ...req, id: uid(), employeeName: currentName, status: "Beklemede" }, ...data.leaveRequests] })}
+          />
         )}
         {tab === "mesai" && role === "yonetici" && (
           <ManagerOvertime data={data} />
@@ -1012,7 +1032,18 @@ function EmployeeList({ data, persist }) {
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {data.employees.map((e) => (
-            <Card key={e} style={{ padding: "10px 16px", fontWeight: 600 }}>{e}</Card>
+            <EmployeeLeaveRow
+              key={e}
+              name={e}
+              entitlement={(data.employeeLeaveEntitlements || {})[e]}
+              usedDays={computeUsedLeaveDays(data.leaveRequests, e)}
+              onSave={(days) =>
+                persist({
+                  ...data,
+                  employeeLeaveEntitlements: { ...(data.employeeLeaveEntitlements || {}), [e]: days },
+                })
+              }
+            />
           ))}
         </div>
       )}
@@ -1037,6 +1068,38 @@ function EmployeeList({ data, persist }) {
   );
 }
 
+function EmployeeLeaveRow({ name, entitlement, usedDays, onSave }) {
+  const [value, setValue] = useState(entitlement ?? "");
+  const remaining = entitlement !== undefined && entitlement !== null && entitlement !== "" ? Number(entitlement) - usedDays : null;
+
+  return (
+    <Card>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div style={{ fontWeight: 700 }}>{name}</div>
+        <div style={{ fontSize: 12, color: MUTED }}>
+          {remaining !== null ? (
+            <>Kullanılan: <b style={{ color: INK }}>{usedDays}</b> gün · Kalan: <b style={{ color: remaining < 0 ? RED : GREEN }}>{remaining}</b> gün</>
+          ) : (
+            "Yıllık izin hakkı tanımlanmadı"
+          )}
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center" }}>
+        <input
+          type="number"
+          min="0"
+          style={{ ...inputStyle, width: 90 }}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="Örn. 14"
+        />
+        <span style={{ fontSize: 12, color: MUTED }}>gün / yıl</span>
+        <GhostButton onClick={() => onSave(value === "" ? null : Number(value))}>Kaydet</GhostButton>
+      </div>
+    </Card>
+  );
+}
+
 function ManagerLeaves({ data, persist }) {
   function setStatus(id, status) {
     persist({ ...data, leaveRequests: data.leaveRequests.map((l) => (l.id === id ? { ...l, status } : l)) });
@@ -1053,8 +1116,13 @@ function ManagerLeaves({ data, persist }) {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <div>
                 <div style={{ fontWeight: 700 }}>{l.employeeName} · {l.type}</div>
-                <div style={{ fontSize: 13, color: MUTED, marginTop: 3 }}>{l.startDate} - {l.endDate}</div>
+                <div style={{ fontSize: 13, color: MUTED, marginTop: 3 }}>{l.startDate} - {l.endDate} ({daysBetweenInclusive(l.startDate, l.endDate)} gün)</div>
                 {l.reason && <div style={{ fontSize: 13, color: MUTED, marginTop: 3 }}>{l.reason}</div>}
+                {l.type === "İzin" && (data.employeeLeaveEntitlements || {})[l.employeeName] !== undefined && (
+                  <div style={{ fontSize: 12, color: MUTED, marginTop: 3 }}>
+                    Yıllık hak: {data.employeeLeaveEntitlements[l.employeeName]} gün · Kullanılan (bu dahil onaylılar): {computeUsedLeaveDays(data.leaveRequests, l.employeeName)} gün
+                  </div>
+                )}
               </div>
               <Badge text={l.status} color={LEAVE_STATUS_COLORS[l.status]} />
             </div>
@@ -1071,9 +1139,11 @@ function ManagerLeaves({ data, persist }) {
   );
 }
 
-function DriverLeaves({ leaves, onSubmit }) {
+function DriverLeaves({ leaves, entitlement, usedDays, onSubmit }) {
   const [form, setForm] = useState({ type: "İzin", startDate: "", endDate: "", reason: "" });
   const [error, setError] = useState("");
+  const hasEntitlement = entitlement !== undefined && entitlement !== null;
+  const remaining = hasEntitlement ? Number(entitlement) - usedDays : null;
 
   function submit() {
     if (!form.startDate || !form.endDate) {
@@ -1088,6 +1158,27 @@ function DriverLeaves({ leaves, onSubmit }) {
   return (
     <div>
       <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 14 }}>İzin / Rapor Bildir</div>
+
+      {hasEntitlement && (
+        <Card style={{ marginBottom: 16, background: "#FAF9F6" }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: MUTED, marginBottom: 8 }}>YILLIK İZİN HAKKINIZ</div>
+          <div style={{ display: "flex", gap: 20 }}>
+            <div>
+              <div style={{ fontSize: 22, fontWeight: 800 }}>{entitlement}</div>
+              <div style={{ fontSize: 11, color: MUTED }}>Toplam gün</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 22, fontWeight: 800 }}>{usedDays}</div>
+              <div style={{ fontSize: 11, color: MUTED }}>Kullanılan</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 22, fontWeight: 800, color: remaining < 0 ? RED : GREEN }}>{remaining}</div>
+              <div style={{ fontSize: 11, color: MUTED }}>Kalan</div>
+            </div>
+          </div>
+        </Card>
+      )}
+
       <Card style={{ marginBottom: 18 }}>
         <Field label="Tür">
           <select style={inputStyle} value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
