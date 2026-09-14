@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
+import L from "leaflet";
 import { supabase } from "./supabaseClient";
 import AuthLogin from "./AuthLogin";
 
@@ -418,6 +419,10 @@ export default function App() {
     if (patch.status) captureLocationSilently();
   }
 
+  function deleteShipment(id) {
+    persist({ ...data, shipments: data.shipments.filter((s) => s.id !== id) });
+  }
+
   function handlePhotoPick(shipmentId) {
     setActiveShipmentForPhoto(shipmentId);
     fileInputRef.current?.click();
@@ -491,7 +496,7 @@ export default function App() {
 
       <div style={{ padding: 20, maxWidth: 760, margin: "0 auto" }}>
         {tab === "nakliyeler" && role === "yonetici" && (
-          <ManagerShipments data={data} persist={persist} />
+          <ManagerShipments data={data} persist={persist} onDelete={deleteShipment} />
         )}
         {tab === "nakliyeler" && role === "calisan" && (
           <DriverShipments
@@ -633,12 +638,34 @@ function exportShipmentsToExcel(shipments) {
   XLSX.writeFile(wb, `nakliyeler-${dateStr}.xlsx`);
 }
 
-function ManagerShipments({ data, persist }) {
+function getTodayStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function getWeekRange() {
+  const now = new Date();
+  const day = now.getDay();
+  const diffToMonday = (day === 0 ? -6 : 1) - day;
+  const monday = new Date(now);
+  monday.setDate(now.getDate() + diffToMonday);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  return { from: monday.toISOString().slice(0, 10), to: sunday.toISOString().slice(0, 10) };
+}
+
+function getMonthRange() {
+  const now = new Date();
+  const first = new Date(now.getFullYear(), now.getMonth(), 1);
+  const last = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  return { from: first.toISOString().slice(0, 10), to: last.toISOString().slice(0, 10) };
+}
+
+function ManagerShipments({ data, persist, onDelete }) {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ title: "Nakliye", musteri: "", from: "", to: "", equipment: "", plate: "", assignedTo: data.employees[0] || "", date: "" });
   const [error, setError] = useState("");
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
+  const [dateFrom, setDateFrom] = useState(getTodayStr());
+  const [dateTo, setDateTo] = useState(getTodayStr());
   const [driverFilter, setDriverFilter] = useState("");
   const [plateFilter, setPlateFilter] = useState("");
 
@@ -687,6 +714,11 @@ function ManagerShipments({ data, persist }) {
 
       <Card style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: MUTED, marginBottom: 10 }}>FİLTRELE</div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+          <GhostButton onClick={() => { const t = getTodayStr(); setDateFrom(t); setDateTo(t); }}>Bugün</GhostButton>
+          <GhostButton onClick={() => { const r = getWeekRange(); setDateFrom(r.from); setDateTo(r.to); }}>Bu Hafta</GhostButton>
+          <GhostButton onClick={() => { const r = getMonthRange(); setDateFrom(r.from); setDateTo(r.to); }}>Bu Ay</GhostButton>
+        </div>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 140 }}>
             <Field label="Başlangıç">
@@ -800,8 +832,27 @@ function ManagerShipments({ data, persist }) {
         <EmptyState text={data.shipments.length === 0 ? "Henüz nakliye görevi yok. Yeni nakliye ekleyerek başlayın." : "Seçilen filtrelere uyan nakliye yok."} />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ fontSize: 12, color: MUTED }}>{filteredShipments.length} kayıt listeleniyor</div>
           {filteredShipments.map((s) => (
-            <ShipmentCard key={s.id} s={s} showAssignee />
+            <ShipmentCard
+              key={s.id}
+              s={s}
+              showAssignee
+              footer={
+                <div style={{ marginTop: 10 }}>
+                  <button
+                    onClick={() => {
+                      if (window.confirm("Bu nakliye kaydını silmek istediğinize emin misiniz? Bu işlem geri alınamaz.")) {
+                        onDelete(s.id);
+                      }
+                    }}
+                    style={{ border: "none", background: "none", color: RED, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0 }}
+                  >
+                    Sil
+                  </button>
+                </div>
+              }
+            />
           ))}
         </div>
       )}
@@ -2118,65 +2169,54 @@ function MyDocuments({ employeeName, docs }) {
   );
 }
 
+const LOCATION_MARKER_ICON = new L.Icon({
+  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+});
+
 function DriverLocationsMap({ locations }) {
   const mapContainerRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const markersRef = useRef([]);
 
   useEffect(() => {
-    let cancelled = false;
+    if (!mapContainerRef.current) return;
 
-    import("leaflet").then((L) => {
-      if (cancelled) return;
-      const leaflet = L.default || L;
+    if (!mapInstanceRef.current) {
+      mapInstanceRef.current = L.map(mapContainerRef.current).setView([38.42, 27.14], 8);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "© OpenStreetMap contributors",
+        maxZoom: 19,
+      }).addTo(mapInstanceRef.current);
+    }
 
-      const icon = new leaflet.Icon({
-        iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
-        iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
-        shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
-        iconSize: [25, 41],
-        iconAnchor: [12, 41],
-      });
+    markersRef.current.forEach((m) => m.remove());
+    markersRef.current = [];
 
-      if (!mapInstanceRef.current) {
-        mapInstanceRef.current = leaflet.map(mapContainerRef.current).setView([38.42, 27.14], 8);
-        leaflet
-          .tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-            attribution: "© OpenStreetMap contributors",
-            maxZoom: 19,
-          })
-          .addTo(mapInstanceRef.current);
-      }
+    const entries = Object.entries(locations || {}).filter(([, loc]) => loc && loc.lat && loc.lng);
 
-      markersRef.current.forEach((m) => m.remove());
-      markersRef.current = [];
-
-      const entries = Object.entries(locations || {}).filter(([, loc]) => loc && loc.lat && loc.lng);
-
-      entries.forEach(([name, loc]) => {
-        const minutesAgo = loc.timestamp
-          ? Math.max(0, Math.round((Date.now() - new Date(loc.timestamp).getTime()) / 60000))
-          : null;
-        const marker = leaflet.marker([loc.lat, loc.lng], { icon }).addTo(mapInstanceRef.current);
-        marker.bindPopup(
-          `<b>${name}</b><br/>${minutesAgo !== null ? minutesAgo + " dakika önce" : "Zaman bilinmiyor"}`
-        );
-        markersRef.current.push(marker);
-      });
-
-      if (entries.length > 0) {
-        const bounds = leaflet.latLngBounds(entries.map(([, loc]) => [loc.lat, loc.lng]));
-        if (bounds.isValid()) {
-          mapInstanceRef.current.fitBounds(bounds, { padding: [30, 30], maxZoom: 13 });
-        }
-      }
-
-      setTimeout(() => mapInstanceRef.current && mapInstanceRef.current.invalidateSize(), 100);
+    entries.forEach(([name, loc]) => {
+      const minutesAgo = loc.timestamp
+        ? Math.max(0, Math.round((Date.now() - new Date(loc.timestamp).getTime()) / 60000))
+        : null;
+      const marker = L.marker([loc.lat, loc.lng], { icon: LOCATION_MARKER_ICON }).addTo(mapInstanceRef.current);
+      marker.bindPopup(
+        `<b>${name}</b><br/>${minutesAgo !== null ? minutesAgo + " dakika önce" : "Zaman bilinmiyor"}`
+      );
+      markersRef.current.push(marker);
     });
 
-    return () => {
-      cancelled = true;
-    };
+    if (entries.length > 0) {
+      const bounds = L.latLngBounds(entries.map(([, loc]) => [loc.lat, loc.lng]));
+      if (bounds.isValid()) {
+        mapInstanceRef.current.fitBounds(bounds, { padding: [30, 30], maxZoom: 13 });
+      }
+    }
+
+    setTimeout(() => mapInstanceRef.current && mapInstanceRef.current.invalidateSize(), 150);
   }, [locations]);
 
   useEffect(() => {
